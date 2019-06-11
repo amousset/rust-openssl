@@ -17,7 +17,7 @@ use stack::StackRef;
 use x509::{X509Ref, X509};
 use x509::store::X509StoreRef;
 use symm::Cipher;
-use {cvt, cvt_n, cvt_p};
+use {cvt, cvt_p};
 
 #[cfg(ossl110)]
 pub use self::recipient_info::*;
@@ -100,79 +100,39 @@ impl CmsContentInfoRef {
         }
     }
 
-    /// Verify the sender's signature given an optional sender's certificate `cert` and CA store
-    /// `store`. If the signature is correct, signed data are returned, otherwise `None`.
-    ///
-    /// OpenSSL documentation at [`CMS_verify`]
-    /// 
-    /// [`CMS_verify`]: https://www.openssl.org/docs/manmaster/man3/CMS_verify.html
     pub fn verify(
         &self,
-        certs: Option<&StackRef<X509>>,
+        certs: &StackRef<X509>,
         store: &X509StoreRef,
+        indata: Option<&[u8]>,
+        out: Option<&mut Vec<u8>>,
         flags: CMSOptions,
-    ) -> Result<Option<Vec<u8>>, ErrorStack> {
-        let mut out = MemBio::new()?;
-        let is_valid = self._verify(certs, store, None, Some(&mut out), flags)?;
-        if is_valid {
-            Ok(Some(out.get_buf().to_owned()))
-        } else {
-            Ok(None)
-        }
-    }
+    ) -> Result<(), ErrorStack> {
+        let out_bio = MemBio::new()?;
 
-    /// Verify the sender's signature given an optional sender's certificate `cert` and CA store
-    /// `store`. If the signature is correct, returns `true`, otherwise `false`.
-    /// This is the version for detached signatures.
-    ///
-    /// OpenSSL documentation at [`CMS_verify`]
-    /// 
-    /// [`CMS_verify`]: https://www.openssl.org/docs/manmaster/man3/CMS_verify.html
-    pub fn verify_detached(
-        &self,
-        certs: Option<&StackRef<X509>>,
-        store: &X509StoreRef,
-        data: &[u8],
-        flags: CMSOptions,
-    ) -> Result<bool, ErrorStack> {
-        let mut in_data = MemBioSlice::new(data)?;
-        self._verify(certs, store, Some(&mut in_data), None, flags)
-    }
+        let indata_bio = match indata {
+            Some(data) => Some(MemBioSlice::new(data)?),
+            None => None,
+        };
+        let indata_bio_ptr = indata_bio.as_ref().map_or(ptr::null_mut(), |p| p.as_ptr());
 
-    fn _verify(
-        &self,
-        certs: Option<&StackRef<X509>>,
-        store: &X509StoreRef,
-        data: Option<&mut MemBioSlice>,
-        out: Option<&mut MemBio>,
-        flags: CMSOptions,
-    ) -> Result<bool, ErrorStack> {
         unsafe {
-            let certs = match certs {
-                Some(certs) => certs.as_ptr(),
-                None => ptr::null_mut(),
-            };
-            let store = store.as_ptr();
-            let in_ptr = match data {
-                Some(in_ptr) => in_ptr.as_ptr(),
-                None => ptr::null_mut(),
-            };
-            let out_ptr = match out {
-                Some(out_ptr) => out_ptr.as_ptr(),
-                None => ptr::null_mut(),
-            };
-
-            let is_valid = cvt_n(ffi::CMS_verify(
+            cvt(ffi::CMS_verify(
                 self.as_ptr(),
-                certs,
-                store,
-                in_ptr,
-                out_ptr,
+                certs.as_ptr(),
+                store.as_ptr(),
+                indata_bio_ptr,
+                out_bio.as_ptr(),
                 flags.bits(),
-            ))? == 1;
-
-            Ok(is_valid)
+            )).map(|_| ())?;
         }
+
+        if let Some(data) = out {
+            data.clear();
+            data.extend_from_slice(out_bio.get_buf());
+        }
+
+        Ok(())
     }
 
     to_der! {
@@ -489,9 +449,9 @@ mod test {
         store_builder.add_cert(priv_cert.cert.clone()).expect("failed to add certificate to store");
         let store = store_builder.build();
 
-        let verify = verify.verify(Some(&cert_stack), &store, CMSOptions::empty()).expect("failed to verify cms");
-        let verify = verify.expect("cms verification returned None");
-        let verify = String::from_utf8(verify).expect("failed to create string from cms content");
+        let mut output = Vec::new();
+        verify.verify(&cert_stack, &store, None, Some(&mut output), CMSOptions::empty()).expect("failed to verify cms");
+        let verify = String::from_utf8(output).expect("failed to create string from cms content");
 
         assert_eq!(input, verify);
     }
@@ -519,7 +479,6 @@ mod test {
         store_builder.add_cert(priv_cert.cert.clone()).expect("failed to add certificate to store");
         let store = store_builder.build();
 
-        let verify = verify.verify_detached(Some(&cert_stack), &store, input.as_bytes(), CMSOptions::empty()).expect("failed to verify cms");
-        assert!(verify);
+        verify.verify(&cert_stack, &store, Some(input.as_bytes()), None, CMSOptions::empty()).expect("failed to verify cms");
     }
 }
